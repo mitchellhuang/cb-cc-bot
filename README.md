@@ -81,3 +81,4 @@ kubectl create secret generic cb-cc-bot-secrets \
 | `TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
 | `TELEGRAM_CHAT_ID` | — | Telegram chat ID to send messages to |
 | `POLL_INTERVAL` | `5m` | How often to poll Gmail |
+| `MAX_SELL_USD` | — | Hard cap on sell amount in USD; bot blocks and sends a Telegram alert if the required sell exceeds this |

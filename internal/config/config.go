@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -14,6 +15,7 @@ type Config struct {
 	TelegramBotToken     string
 	TelegramChatID       string
 	PollInterval         time.Duration
+	MaxSellUSD           float64
 }
 
 func Load() (*Config, error) {
@@ -32,6 +34,16 @@ func Load() (*Config, error) {
 		TelegramChatID:       os.Getenv("TELEGRAM_CHAT_ID"),
 		PollInterval:         pollInterval,
 	}
+
+	maxSellStr := os.Getenv("MAX_SELL_USD")
+	if maxSellStr == "" {
+		return nil, fmt.Errorf("missing required env var: MAX_SELL_USD")
+	}
+	maxSellUSD, err := strconv.ParseFloat(maxSellStr, 64)
+	if err != nil || maxSellUSD <= 0 {
+		return nil, fmt.Errorf("invalid MAX_SELL_USD %q: must be a positive number", maxSellStr)
+	}
+	cfg.MaxSellUSD = maxSellUSD
 
 	required := map[string]string{
 		"COINBASE_API_KEY_NAME": cfg.CoinbaseAPIKeyName,

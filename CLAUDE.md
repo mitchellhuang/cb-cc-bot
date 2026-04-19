@@ -61,6 +61,7 @@ internal/bot/         # orchestration: gmail → email → coinbase balance chec
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from BotFather |
 | `TELEGRAM_CHAT_ID` | Your personal chat ID with the bot |
 | `POLL_INTERVAL` | Gmail poll interval (default: `5m`) |
+| `MAX_SELL_USD` | Hard cap on the USD sell amount; bot blocks and alerts if exceeded |
 
 ## Coinbase Advanced Trade API
 

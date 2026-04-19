@@ -99,6 +99,18 @@ func (b *Bot) handleEmail(ctx context.Context, msg *gmailapi.Message) {
 		return
 	}
 
+	if sellAmount > b.cfg.MaxSellUSD {
+		text := fmt.Sprintf(
+			"Sell blocked: required amount *$%.2f* exceeds the configured limit of *$%.2f*. Manual action required.",
+			sellAmount, b.cfg.MaxSellUSD,
+		)
+		log.Printf("email %s: sell amount $%.2f exceeds MAX_SELL_USD $%.2f, blocked", msg.Id, sellAmount, b.cfg.MaxSellUSD)
+		if err := b.telegram.SendMessage(ctx, text); err != nil {
+			log.Printf("telegram notify: %v", err)
+		}
+		return
+	}
+
 	btcPrice, err := b.coinbase.BTCPrice(ctx)
 	if err != nil {
 		log.Printf("email %s: get BTC price: %v", msg.Id, err)
