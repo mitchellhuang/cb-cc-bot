@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mitchellhuang/cb-cc-bot/internal/coinbase"
 	"github.com/mitchellhuang/cb-cc-bot/internal/config"
 	"github.com/mitchellhuang/cb-cc-bot/internal/email"
 	"github.com/mitchellhuang/cb-cc-bot/internal/gmail"
@@ -15,17 +14,34 @@ import (
 	gmailapi "google.golang.org/api/gmail/v1"
 )
 
+type gmailPoller interface {
+	PollSince(ctx context.Context, since time.Time) ([]*gmailapi.Message, error)
+}
+
+type coinbaseClient interface {
+	USDCBalance(ctx context.Context) (float64, error)
+	BTCPrice(ctx context.Context) (float64, error)
+	MarketSellBTC(ctx context.Context, quoteUSD float64) (string, error)
+}
+
+type telegramClient interface {
+	SendMessage(ctx context.Context, text string) error
+	SendApprovalPrompt(ctx context.Context, text string) (int, error)
+	PollUpdates(ctx context.Context, offset int) ([]telegram.Update, int, error)
+	AnswerCallbackQuery(ctx context.Context, queryID string) error
+}
+
 type Bot struct {
-	gmail    *gmail.Client
-	coinbase *coinbase.Client
-	telegram *telegram.Client
+	gmail    gmailPoller
+	coinbase coinbaseClient
+	telegram telegramClient
 	cfg      *config.Config
 
 	mu            sync.Mutex
 	pendingAmount float64 // USD sell amount awaiting Telegram approval; 0 if none
 }
 
-func New(g *gmail.Client, cb *coinbase.Client, tg *telegram.Client, cfg *config.Config) *Bot {
+func New(g gmailPoller, cb coinbaseClient, tg telegramClient, cfg *config.Config) *Bot {
 	return &Bot{gmail: g, coinbase: cb, telegram: tg, cfg: cfg}
 }
 
