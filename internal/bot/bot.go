@@ -41,8 +41,9 @@ type Bot struct {
 	cfg      *config.Config
 
 	mu             sync.Mutex
-	pendingAmount  float64 // fee-adjusted USD order size awaiting Telegram approval; 0 if none
-	pendingBTC     float64 // BTC amount to sell, derived from pendingAmount / btcPrice at prompt time
+	pendingPayment float64 // original payment amount from email; used to recalculate at approval time
+	pendingAmount  float64 // fee+slippage adjusted USD order size shown to user; 0 if none pending
+	pendingBTC     float64 // BTC amount shown to user at prompt time (informational)
 }
 
 func New(g gmailPoller, cb coinbaseClient, tg telegramClient, cfg *config.Config) *Bot {
@@ -160,6 +161,7 @@ func (b *Bot) handleEmail(ctx context.Context, msg *gmailapi.Message) {
 	}
 
 	b.mu.Lock()
+	b.pendingPayment = paymentAmount
 	b.pendingAmount = orderSize
 	b.pendingBTC = btcEstimate
 	b.mu.Unlock()
@@ -190,39 +192,88 @@ func (b *Bot) handleCallback(ctx context.Context, cq *telegram.CallbackQuery) {
 	}
 
 	b.mu.Lock()
-	amount := b.pendingAmount
-	btcAmount := b.pendingBTC
+	paymentAmount := b.pendingPayment
+	shownAmount := b.pendingAmount
 	b.mu.Unlock()
 
-	if amount == 0 {
-		log.Printf("callback %q: no pending approval, ignoring", cq.Data)
+	if shownAmount == 0 {
+		log.Printf("callback %q: no pending approval — bot may have restarted", cq.Data)
+		b.telegram.SendMessage(ctx, "This approval prompt has expired — the bot was restarted after it was sent. Please wait for the next email poll to receive a fresh prompt.")
 		return
 	}
 
 	switch cq.Data {
 	case "reject":
 		b.mu.Lock()
+		b.pendingPayment = 0
 		b.pendingAmount = 0
 		b.pendingBTC = 0
 		b.mu.Unlock()
-		text := fmt.Sprintf("Sell skipped. Your USDC balance may not fully cover the autopay of *$%.2f*.", amount)
+		text := fmt.Sprintf("Sell skipped. Your USDC balance may not fully cover the autopay of *$%.2f*.", paymentAmount)
 		if err := b.telegram.SendMessage(ctx, text); err != nil {
 			log.Printf("telegram notify: %v", err)
 		}
 
 	case "approve":
 		b.mu.Lock()
+		b.pendingPayment = 0
 		b.pendingAmount = 0
 		b.pendingBTC = 0
 		b.mu.Unlock()
-		orderID, err := b.coinbase.MarketSellBTC(ctx, btcAmount)
+
+		// Re-fetch live balance and prices at execution time — the prompt may have been
+		// sent minutes or hours ago and conditions may have changed.
+		usdcBalance, err := b.coinbase.USDCBalance(ctx)
 		if err != nil {
-			log.Printf("market sell %.8f BTC: %v", btcAmount, err)
-			text := fmt.Sprintf("Failed to place market sell of *%.8f BTC*: %v", btcAmount, err)
+			log.Printf("approve: get USDC balance: %v", err)
+			b.telegram.SendMessage(ctx, fmt.Sprintf("Failed to fetch USDC balance before selling: %v", err))
+			return
+		}
+		sellAmount := max(0.0, paymentAmount-usdcBalance)
+		if sellAmount == 0 {
+			text := fmt.Sprintf(
+				"*Sell cancelled*\n\nYour USDC balance (*$%.2f*) now covers the payment of *$%.2f*. No sell needed.",
+				usdcBalance, paymentAmount,
+			)
+			log.Printf("approve: balance now covers payment, skipping sell")
 			b.telegram.SendMessage(ctx, text)
 			return
 		}
-		log.Printf("market sell placed: order %s for %.8f BTC (~$%.2f)", orderID, btcAmount, amount)
+		if sellAmount > b.cfg.MaxSellUSD {
+			text := fmt.Sprintf(
+				"*Sell blocked*\n\nRecalculated sell amount *$%.2f* exceeds the configured limit of *$%.2f*. Manual action required.",
+				sellAmount, b.cfg.MaxSellUSD,
+			)
+			log.Printf("approve: recalculated sell $%.2f exceeds MAX_SELL_USD $%.2f", sellAmount, b.cfg.MaxSellUSD)
+			b.telegram.SendMessage(ctx, text)
+			return
+		}
+		feeRate, err := b.coinbase.TakerFeeRate(ctx)
+		if err != nil {
+			log.Printf("approve: get taker fee rate: %v", err)
+			b.telegram.SendMessage(ctx, fmt.Sprintf("Failed to fetch fee rate before selling: %v", err))
+			return
+		}
+		btcPrice, err := b.coinbase.BTCPrice(ctx)
+		if err != nil {
+			log.Printf("approve: get BTC price: %v", err)
+			b.telegram.SendMessage(ctx, fmt.Sprintf("Failed to fetch BTC price before selling: %v", err))
+			return
+		}
+		orderSize := sellAmount / (1 - feeRate) * (1 + b.cfg.SlippageBuffer)
+		btcAmount := orderSize / btcPrice
+
+		if orderSize != shownAmount {
+			log.Printf("approve: order size recalculated from $%.2f to $%.2f due to changed conditions", shownAmount, orderSize)
+		}
+
+		orderID, err := b.coinbase.MarketSellBTC(ctx, btcAmount)
+		if err != nil {
+			log.Printf("market sell %.8f BTC: %v", btcAmount, err)
+			b.telegram.SendMessage(ctx, fmt.Sprintf("Failed to place market sell of *%.8f BTC*: %v", btcAmount, err))
+			return
+		}
+		log.Printf("market sell placed: order %s for %.8f BTC (~$%.2f)", orderID, btcAmount, orderSize)
 		if err := b.telegram.SendMessage(ctx, fmt.Sprintf("Order placed. Waiting for fill... Order ID: `%s`", orderID)); err != nil {
 			log.Printf("telegram notify: %v", err)
 		}
@@ -234,7 +285,7 @@ func (b *Bot) handleCallback(ctx context.Context, cq *telegram.CallbackQuery) {
 			return
 		}
 
-		usdcBalance, err := b.coinbase.USDCBalance(ctx)
+		newBalance, err := b.coinbase.USDCBalance(ctx)
 		if err != nil {
 			log.Printf("post-fill USDC balance: %v", err)
 		}
@@ -242,7 +293,7 @@ func (b *Bot) handleCallback(ctx context.Context, cq *telegram.CallbackQuery) {
 		log.Printf("order %s filled: %.8f BTC @ $%.2f, received $%.2f after $%.2f fees", orderID, fill.FilledBTC, fill.FillPrice, fill.USDCReceived, fill.Fees)
 		text := fmt.Sprintf(
 			"*Order filled*\n\nSold: *%.8f BTC* @ $%.2f\nFees: *$%.2f*\nUSDC received: *$%.2f*\nNew USDC balance: *$%.2f*",
-			fill.FilledBTC, fill.FillPrice, fill.Fees, fill.USDCReceived, usdcBalance,
+			fill.FilledBTC, fill.FillPrice, fill.Fees, fill.USDCReceived, newBalance,
 		)
 		if err := b.telegram.SendMessage(ctx, text); err != nil {
 			log.Printf("telegram notify: %v", err)

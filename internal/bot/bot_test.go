@@ -195,18 +195,25 @@ func TestHandleCallback_Approve_ExecutesSell(t *testing.T) {
 	cb := &mockCoinbase{orderID: "order-123"}
 	tg := &mockTelegram{}
 	b := newBot(cb, tg, 10000)
-	orderSize := 5840.03 / (1 - 0.006) * (1 + 0.005)
-	btcAmount := orderSize / 50000.0
-	b.pendingAmount = orderSize
-	b.pendingBTC = btcAmount
+	// usdcBalance=0, so recalculation at approval time uses the full payment amount.
+	cb.usdcBalance = 0
+	cb.btcPrice = 50000.0
+	cb.takerFee = 0.006
+	// pendingAmount/pendingBTC reflect what was shown to the user at prompt time (stale).
+	// The approve path recalculates fresh — expected BTC is based on full 6840.03 with 0 balance.
+	recalcOrder := 6840.03 / (1 - 0.006) * (1 + 0.005)
+	expectedBTC := recalcOrder / 50000.0
+	b.pendingPayment = 6840.03
+	b.pendingAmount = 5840.03 / (1 - 0.006) * (1 + 0.005) // stale shown amount
+	b.pendingBTC = b.pendingAmount / 50000.0
 
 	b.handleCallback(context.Background(), &telegram.CallbackQuery{ID: "cq1", Data: "approve"})
 
 	if !cb.sellCalled {
 		t.Fatal("expected MarketSellBTC to be called")
 	}
-	if !approxEqual(cb.sellAmount, btcAmount) {
-		t.Errorf("sell BTC amount = %.8f, want %.8f", cb.sellAmount, btcAmount)
+	if !approxEqual(cb.sellAmount, expectedBTC) {
+		t.Errorf("sell BTC amount = %.8f, want %.8f", cb.sellAmount, expectedBTC)
 	}
 	if b.pendingAmount != 0 {
 		t.Error("pendingAmount should be cleared after approval")
@@ -245,15 +252,18 @@ func TestHandleCallback_Reject_SkipsSell(t *testing.T) {
 	}
 }
 
-func TestHandleCallback_NoPending_Ignored(t *testing.T) {
+func TestHandleCallback_NoPending_NotifiesUser(t *testing.T) {
 	cb := &mockCoinbase{}
 	tg := &mockTelegram{}
 	b := newBot(cb, tg, 10000)
-	// pendingAmount is 0
+	// pendingAmount is 0 — simulates bot restart after prompt was sent
 
 	b.handleCallback(context.Background(), &telegram.CallbackQuery{ID: "cq1", Data: "approve"})
 
 	if cb.sellCalled {
 		t.Error("sell should not be called when there is no pending approval")
+	}
+	if len(tg.messages) != 1 || !strings.Contains(tg.messages[0], "expired") {
+		t.Errorf("expected expiry notification, got: %v", tg.messages)
 	}
 }
