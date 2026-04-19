@@ -16,14 +16,16 @@ import (
 
 type mockCoinbase struct {
 	usdcBalance float64
+	takerFee    float64
 	btcPrice    float64
 	orderID     string
 	sellCalled  bool
 	sellAmount  float64
 }
 
-func (m *mockCoinbase) USDCBalance(_ context.Context) (float64, error) { return m.usdcBalance, nil }
-func (m *mockCoinbase) BTCPrice(_ context.Context) (float64, error)    { return m.btcPrice, nil }
+func (m *mockCoinbase) USDCBalance(_ context.Context) (float64, error)  { return m.usdcBalance, nil }
+func (m *mockCoinbase) TakerFeeRate(_ context.Context) (float64, error) { return m.takerFee, nil }
+func (m *mockCoinbase) BTCPrice(_ context.Context) (float64, error)     { return m.btcPrice, nil }
 func (m *mockCoinbase) MarketSellBTC(_ context.Context, usd float64) (string, error) {
 	m.sellCalled = true
 	m.sellAmount = usd
@@ -108,7 +110,7 @@ func TestHandleEmail_BalanceCoversExactly(t *testing.T) {
 }
 
 func TestHandleEmail_PartialBalance_SendsPrompt(t *testing.T) {
-	cb := &mockCoinbase{usdcBalance: 1000.00, btcPrice: 50000.00}
+	cb := &mockCoinbase{usdcBalance: 1000.00, takerFee: 0.006, btcPrice: 50000.00}
 	tg := &mockTelegram{}
 	b := newBot(cb, tg, 10000)
 
@@ -117,17 +119,15 @@ func TestHandleEmail_PartialBalance_SendsPrompt(t *testing.T) {
 	if len(tg.prompts) != 1 {
 		t.Fatalf("expected 1 approval prompt, got %d", len(tg.prompts))
 	}
-	// sell amount should be $5,840.03 (6840.03 - 1000.00)
-	if !strings.Contains(tg.prompts[0], "5840.03") {
-		t.Errorf("prompt missing expected sell amount: %s", tg.prompts[0])
-	}
-	if b.pendingAmount != 5840.03 {
-		t.Errorf("pendingAmount = %.2f, want 5840.03", b.pendingAmount)
+	// needed = 5840.03, order size inflated for 0.6% fee = 5840.03 / 0.994
+	wantOrder := 5840.03 / (1 - 0.006)
+	if b.pendingAmount != wantOrder {
+		t.Errorf("pendingAmount = %.4f, want %.4f", b.pendingAmount, wantOrder)
 	}
 }
 
 func TestHandleEmail_NoBalance_SendsPromptForFullAmount(t *testing.T) {
-	cb := &mockCoinbase{usdcBalance: 0, btcPrice: 50000.00}
+	cb := &mockCoinbase{usdcBalance: 0, takerFee: 0.006, btcPrice: 50000.00}
 	tg := &mockTelegram{}
 	b := newBot(cb, tg, 10000)
 
@@ -136,8 +136,9 @@ func TestHandleEmail_NoBalance_SendsPromptForFullAmount(t *testing.T) {
 	if len(tg.prompts) != 1 {
 		t.Fatalf("expected 1 approval prompt, got %d", len(tg.prompts))
 	}
-	if b.pendingAmount != 6840.03 {
-		t.Errorf("pendingAmount = %.2f, want 6840.03", b.pendingAmount)
+	wantOrder := 6840.03 / (1 - 0.006)
+	if b.pendingAmount != wantOrder {
+		t.Errorf("pendingAmount = %.4f, want %.4f", b.pendingAmount, wantOrder)
 	}
 }
 
@@ -181,15 +182,17 @@ func TestHandleCallback_Approve_ExecutesSell(t *testing.T) {
 	cb := &mockCoinbase{orderID: "order-123"}
 	tg := &mockTelegram{}
 	b := newBot(cb, tg, 10000)
-	b.pendingAmount = 5840.03
+	// pendingAmount is already the fee-inflated order size set by handleEmail
+	orderSize := 5840.03 / (1 - 0.006)
+	b.pendingAmount = orderSize
 
 	b.handleCallback(context.Background(), &telegram.CallbackQuery{ID: "cq1", Data: "approve"})
 
 	if !cb.sellCalled {
 		t.Fatal("expected MarketSellBTC to be called")
 	}
-	if cb.sellAmount != 5840.03 {
-		t.Errorf("sell amount = %.2f, want 5840.03", cb.sellAmount)
+	if cb.sellAmount != orderSize {
+		t.Errorf("sell amount = %.4f, want %.4f", cb.sellAmount, orderSize)
 	}
 	if b.pendingAmount != 0 {
 		t.Error("pendingAmount should be cleared after approval")

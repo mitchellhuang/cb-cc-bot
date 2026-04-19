@@ -59,6 +59,20 @@ func (c *Client) USDCBalance(ctx context.Context) (float64, error) {
 	return 0, nil
 }
 
+// TakerFeeRate returns your current Advanced Trade taker fee rate (e.g. 0.006 for 0.6%).
+// Market orders are always taker orders.
+func (c *Client) TakerFeeRate(ctx context.Context) (float64, error) {
+	var resp struct {
+		FeeTier struct {
+			TakerFeeRate string `json:"taker_fee_rate"`
+		} `json:"fee_tier"`
+	}
+	if err := c.get(ctx, "/transaction_summary", &resp); err != nil {
+		return 0, err
+	}
+	return strconv.ParseFloat(resp.FeeTier.TakerFeeRate, 64)
+}
+
 // BTCPrice returns the current BTC-USDC ask price.
 func (c *Client) BTCPrice(ctx context.Context) (float64, error) {
 	var resp struct {

@@ -20,6 +20,7 @@ type gmailPoller interface {
 
 type coinbaseClient interface {
 	USDCBalance(ctx context.Context) (float64, error)
+	TakerFeeRate(ctx context.Context) (float64, error)
 	BTCPrice(ctx context.Context) (float64, error)
 	MarketSellBTC(ctx context.Context, quoteUSD float64) (string, error)
 }
@@ -127,16 +128,26 @@ func (b *Bot) handleEmail(ctx context.Context, msg *gmailapi.Message) {
 		return
 	}
 
+	feeRate, err := b.coinbase.TakerFeeRate(ctx)
+	if err != nil {
+		log.Printf("email %s: get taker fee rate: %v", msg.Id, err)
+		return
+	}
+	// Inflate order size so that after Coinbase deducts the taker fee,
+	// the net USDC received equals the amount we actually need.
+	orderSize := sellAmount / (1 - feeRate)
+	feeAmount := orderSize - sellAmount
+
 	btcPrice, err := b.coinbase.BTCPrice(ctx)
 	if err != nil {
 		log.Printf("email %s: get BTC price: %v", msg.Id, err)
 		return
 	}
-	btcEstimate := sellAmount / btcPrice
+	btcEstimate := orderSize / btcPrice
 
 	text := fmt.Sprintf(
-		"*Coinbase Card autopay reminder*\n\nPayment due: *$%.2f*\nCurrent USDC balance: *$%.2f*\nAmount to sell: *$%.2f* (~%.6f BTC @ $%.2f/BTC)\n\nSell BTC to cover the difference?",
-		paymentAmount, usdcBalance, sellAmount, btcEstimate, btcPrice,
+		"*Coinbase Card autopay reminder*\n\nPayment due: *$%.2f*\nCurrent USDC balance: *$%.2f*\nNeeded: *$%.2f*\nAdv. Trade fee (~%.2f%%): *$%.2f*\nOrder size: *$%.2f* (~%.6f BTC @ $%.2f/BTC)\n\nSell BTC to cover the difference?",
+		paymentAmount, usdcBalance, sellAmount, feeRate*100, feeAmount, orderSize, btcEstimate, btcPrice,
 	)
 	if _, err := b.telegram.SendApprovalPrompt(ctx, text); err != nil {
 		log.Printf("email %s: send approval prompt: %v", msg.Id, err)
@@ -144,7 +155,7 @@ func (b *Bot) handleEmail(ctx context.Context, msg *gmailapi.Message) {
 	}
 
 	b.mu.Lock()
-	b.pendingAmount = sellAmount
+	b.pendingAmount = orderSize
 	b.mu.Unlock()
 }
 
