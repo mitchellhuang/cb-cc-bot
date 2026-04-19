@@ -91,21 +91,25 @@ func (c *Client) BTCPrice(ctx context.Context) (float64, error) {
 	return strconv.ParseFloat(resp.Pricebooks[0].Asks[0].Price, 64)
 }
 
-// MarketSellBTC places a market sell order for the given USD quote size and returns the order ID.
-func (c *Client) MarketSellBTC(ctx context.Context, quoteUSD float64) (string, error) {
+// MarketSellBTC places a market sell order for the given BTC amount and returns the order ID.
+// btcAmount is calculated by the caller as orderSizeUSD / currentBTCPrice.
+// Coinbase market sells must be parameterized in base currency (BTC), not quote currency (USD).
+func (c *Client) MarketSellBTC(ctx context.Context, btcAmount float64) (string, error) {
 	body := map[string]any{
 		"client_order_id": fmt.Sprintf("cb-cc-bot-%d", time.Now().UnixNano()),
 		"product_id":      "BTC-USDC",
 		"side":            "SELL",
 		"order_configuration": map[string]any{
 			"market_market_ioc": map[string]any{
-				"quote_size": fmt.Sprintf("%.2f", quoteUSD),
+				"base_size": fmt.Sprintf("%.8f", btcAmount),
 			},
 		},
 	}
 	var resp struct {
-		Success       bool   `json:"success"`
-		OrderID       string `json:"order_id"`
+		Success         bool `json:"success"`
+		SuccessResponse struct {
+			OrderID string `json:"order_id"`
+		} `json:"success_response"`
 		ErrorResponse struct {
 			Message string `json:"message"`
 		} `json:"error_response"`
@@ -116,7 +120,7 @@ func (c *Client) MarketSellBTC(ctx context.Context, quoteUSD float64) (string, e
 	if !resp.Success {
 		return "", fmt.Errorf("order rejected: %s", resp.ErrorResponse.Message)
 	}
-	return resp.OrderID, nil
+	return resp.SuccessResponse.OrderID, nil
 }
 
 func (c *Client) get(ctx context.Context, path string, out any) error {

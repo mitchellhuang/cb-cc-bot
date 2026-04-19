@@ -16,6 +16,7 @@ type Config struct {
 	TelegramChatID       string
 	PollInterval         time.Duration
 	MaxSellUSD           float64
+	SlippageBuffer       float64
 }
 
 func Load() (*Config, error) {
@@ -34,6 +35,13 @@ func Load() (*Config, error) {
 		TelegramChatID:       os.Getenv("TELEGRAM_CHAT_ID"),
 		PollInterval:         pollInterval,
 	}
+
+	slippageStr := getenv("SLIPPAGE_BUFFER", "0.005")
+	slippageBuffer, err := strconv.ParseFloat(slippageStr, 64)
+	if err != nil || slippageBuffer < 0 {
+		return nil, fmt.Errorf("invalid SLIPPAGE_BUFFER %q: must be a non-negative number", slippageStr)
+	}
+	cfg.SlippageBuffer = slippageBuffer
 
 	maxSellStr := os.Getenv("MAX_SELL_USD")
 	if maxSellStr == "" {

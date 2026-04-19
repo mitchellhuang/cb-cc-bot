@@ -22,7 +22,7 @@ type coinbaseClient interface {
 	USDCBalance(ctx context.Context) (float64, error)
 	TakerFeeRate(ctx context.Context) (float64, error)
 	BTCPrice(ctx context.Context) (float64, error)
-	MarketSellBTC(ctx context.Context, quoteUSD float64) (string, error)
+	MarketSellBTC(ctx context.Context, btcAmount float64) (string, error)
 }
 
 type telegramClient interface {
@@ -38,8 +38,9 @@ type Bot struct {
 	telegram telegramClient
 	cfg      *config.Config
 
-	mu            sync.Mutex
-	pendingAmount float64 // USD sell amount awaiting Telegram approval; 0 if none
+	mu             sync.Mutex
+	pendingAmount  float64 // fee-adjusted USD order size awaiting Telegram approval; 0 if none
+	pendingBTC     float64 // BTC amount to sell, derived from pendingAmount / btcPrice at prompt time
 }
 
 func New(g gmailPoller, cb coinbaseClient, tg telegramClient, cfg *config.Config) *Bot {
@@ -61,11 +62,13 @@ func (b *Bot) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			log.Printf("polling gmail for new emails since %s", watermark.Format(time.RFC3339))
 			msgs, err := b.gmail.PollSince(ctx, watermark)
 			if err != nil {
 				log.Printf("gmail poll: %v", err)
 				continue
 			}
+			log.Printf("poll complete: %d matching email(s) found", len(msgs))
 			watermark = time.Now()
 			for _, msg := range msgs {
 				b.handleEmail(ctx, msg)
@@ -106,8 +109,8 @@ func (b *Bot) handleEmail(ctx context.Context, msg *gmailapi.Message) {
 
 	if sellAmount == 0 {
 		text := fmt.Sprintf(
-			"Your USDC balance (*$%.2f*) covers the upcoming Coinbase Card payment of *$%.2f*. No action needed.",
-			usdcBalance, paymentAmount,
+			"*Coinbase Card autopay reminder*\n\nPayment due: *$%.2f*\nCurrent USDC balance: *$%.2f*\n\nYour balance covers the payment in full. No action needed.",
+			paymentAmount, usdcBalance,
 		)
 		log.Printf("email %s: balance sufficient, notifying", msg.Id)
 		if err := b.telegram.SendMessage(ctx, text); err != nil {
@@ -118,8 +121,8 @@ func (b *Bot) handleEmail(ctx context.Context, msg *gmailapi.Message) {
 
 	if sellAmount > b.cfg.MaxSellUSD {
 		text := fmt.Sprintf(
-			"Sell blocked: required amount *$%.2f* exceeds the configured limit of *$%.2f*. Manual action required.",
-			sellAmount, b.cfg.MaxSellUSD,
+			"*Coinbase Card autopay reminder*\n\nPayment due: *$%.2f*\nCurrent USDC balance: *$%.2f*\nRequired sell: *$%.2f*\n\nSell blocked: required amount exceeds the configured limit of *$%.2f*. Manual action required.",
+			paymentAmount, usdcBalance, sellAmount, b.cfg.MaxSellUSD,
 		)
 		log.Printf("email %s: sell amount $%.2f exceeds MAX_SELL_USD $%.2f, blocked", msg.Id, sellAmount, b.cfg.MaxSellUSD)
 		if err := b.telegram.SendMessage(ctx, text); err != nil {
@@ -133,10 +136,10 @@ func (b *Bot) handleEmail(ctx context.Context, msg *gmailapi.Message) {
 		log.Printf("email %s: get taker fee rate: %v", msg.Id, err)
 		return
 	}
-	// Inflate order size so that after Coinbase deducts the taker fee,
-	// the net USDC received equals the amount we actually need.
-	orderSize := sellAmount / (1 - feeRate)
-	feeAmount := orderSize - sellAmount
+	// Inflate for taker fee, then add slippage buffer to cover price movement at fill time.
+	orderSize := sellAmount / (1 - feeRate) * (1 + b.cfg.SlippageBuffer)
+	feeAmount := (sellAmount / (1 - feeRate)) - sellAmount
+	slippageAmount := orderSize - (sellAmount / (1 - feeRate))
 
 	btcPrice, err := b.coinbase.BTCPrice(ctx)
 	if err != nil {
@@ -146,8 +149,8 @@ func (b *Bot) handleEmail(ctx context.Context, msg *gmailapi.Message) {
 	btcEstimate := orderSize / btcPrice
 
 	text := fmt.Sprintf(
-		"*Coinbase Card autopay reminder*\n\nPayment due: *$%.2f*\nCurrent USDC balance: *$%.2f*\nNeeded: *$%.2f*\nAdv. Trade fee (~%.2f%%): *$%.2f*\nOrder size: *$%.2f* (~%.6f BTC @ $%.2f/BTC)\n\nSell BTC to cover the difference?",
-		paymentAmount, usdcBalance, sellAmount, feeRate*100, feeAmount, orderSize, btcEstimate, btcPrice,
+		"*Coinbase Card autopay reminder*\n\nPayment due: *$%.2f*\nCurrent USDC balance: *$%.2f*\nNeeded: *$%.2f*\nAdv. Trade fee (~%.2f%%): *+$%.2f*\nSlippage buffer (%.2f%%): *+$%.2f*\nOrder size: *$%.2f* (~%.6f BTC @ $%.2f/BTC)\n\nSell BTC to cover the difference?",
+		paymentAmount, usdcBalance, sellAmount, feeRate*100, feeAmount, b.cfg.SlippageBuffer*100, slippageAmount, orderSize, btcEstimate, btcPrice,
 	)
 	if _, err := b.telegram.SendApprovalPrompt(ctx, text); err != nil {
 		log.Printf("email %s: send approval prompt: %v", msg.Id, err)
@@ -156,6 +159,7 @@ func (b *Bot) handleEmail(ctx context.Context, msg *gmailapi.Message) {
 
 	b.mu.Lock()
 	b.pendingAmount = orderSize
+	b.pendingBTC = btcEstimate
 	b.mu.Unlock()
 }
 
@@ -185,6 +189,7 @@ func (b *Bot) handleCallback(ctx context.Context, cq *telegram.CallbackQuery) {
 
 	b.mu.Lock()
 	amount := b.pendingAmount
+	btcAmount := b.pendingBTC
 	b.mu.Unlock()
 
 	if amount == 0 {
@@ -196,6 +201,7 @@ func (b *Bot) handleCallback(ctx context.Context, cq *telegram.CallbackQuery) {
 	case "reject":
 		b.mu.Lock()
 		b.pendingAmount = 0
+		b.pendingBTC = 0
 		b.mu.Unlock()
 		text := fmt.Sprintf("Sell skipped. Your USDC balance may not fully cover the autopay of *$%.2f*.", amount)
 		if err := b.telegram.SendMessage(ctx, text); err != nil {
@@ -205,16 +211,17 @@ func (b *Bot) handleCallback(ctx context.Context, cq *telegram.CallbackQuery) {
 	case "approve":
 		b.mu.Lock()
 		b.pendingAmount = 0
+		b.pendingBTC = 0
 		b.mu.Unlock()
-		orderID, err := b.coinbase.MarketSellBTC(ctx, amount)
+		orderID, err := b.coinbase.MarketSellBTC(ctx, btcAmount)
 		if err != nil {
-			log.Printf("market sell $%.2f: %v", amount, err)
-			text := fmt.Sprintf("Failed to place market sell of *$%.2f*: %v", amount, err)
+			log.Printf("market sell %.8f BTC: %v", btcAmount, err)
+			text := fmt.Sprintf("Failed to place market sell of *%.8f BTC*: %v", btcAmount, err)
 			b.telegram.SendMessage(ctx, text)
 			return
 		}
-		log.Printf("market sell placed: order %s for $%.2f", orderID, amount)
-		text := fmt.Sprintf("Market sell of *$%.2f* placed. Order ID: `%s`", amount, orderID)
+		log.Printf("market sell placed: order %s for %.8f BTC (~$%.2f)", orderID, btcAmount, amount)
+		text := fmt.Sprintf("Market sell of *%.8f BTC* (~$%.2f) placed. Order ID: `%s`", btcAmount, amount, orderID)
 		if err := b.telegram.SendMessage(ctx, text); err != nil {
 			log.Printf("telegram notify: %v", err)
 		}

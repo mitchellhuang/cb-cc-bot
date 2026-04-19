@@ -62,6 +62,7 @@ internal/bot/         # orchestration: gmail → email → coinbase balance chec
 | `TELEGRAM_CHAT_ID` | Your personal chat ID with the bot |
 | `POLL_INTERVAL` | Gmail poll interval (default: `5m`) |
 | `MAX_SELL_USD` | Hard cap on the USD sell amount; bot blocks and alerts if exceeded |
+| `SLIPPAGE_BUFFER` | Fractional buffer added to order size to cover price movement at fill time (default: `0.005` = 0.5%) |
 
 ## Coinbase Advanced Trade API
 
