@@ -38,6 +38,14 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	}, nil
 }
 
+// Ping verifies the API key is valid by fetching the accounts list.
+func (c *Client) Ping(ctx context.Context) error {
+	var resp struct {
+		Accounts []struct{} `json:"accounts"`
+	}
+	return c.get(ctx, "/accounts", &resp)
+}
+
 // USDCBalance returns the available USDC balance.
 func (c *Client) USDCBalance(ctx context.Context) (float64, error) {
 	var resp struct {

@@ -44,6 +44,12 @@ func NewClient(cfg *config.Config) (*Client, error) {
 	return &Client{svc: svc}, nil
 }
 
+// Ping verifies the OAuth token is valid by fetching the Gmail profile.
+func (c *Client) Ping(ctx context.Context) error {
+	_, err := c.svc.Users.GetProfile("me").Context(ctx).Do()
+	return err
+}
+
 // PollSince returns Coinbase autopay reminder emails received after the given time.
 func (c *Client) PollSince(ctx context.Context, since time.Time) ([]*gmailapi.Message, error) {
 	query := fmt.Sprintf(`from:noreply@creditcard.coinbase.com subject:"Reminder - Your automatic payment is coming up" after:%d`, since.Unix())

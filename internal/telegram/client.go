@@ -44,6 +44,20 @@ type Message struct {
 	Text      string `json:"text"`
 }
 
+// Ping verifies the bot token is valid via getMe.
+func (c *Client) Ping(ctx context.Context) error {
+	var resp struct {
+		OK bool `json:"ok"`
+	}
+	if err := c.call(ctx, "getMe", url.Values{}, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("getMe returned ok=false")
+	}
+	return nil
+}
+
 // SendApprovalPrompt sends a message with Yes/No inline keyboard buttons.
 func (c *Client) SendApprovalPrompt(ctx context.Context, text string) (int, error) {
 	keyboard := map[string]any{
