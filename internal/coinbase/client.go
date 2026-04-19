@@ -123,6 +123,67 @@ func (c *Client) MarketSellBTC(ctx context.Context, btcAmount float64) (string, 
 	return resp.SuccessResponse.OrderID, nil
 }
 
+// OrderFill contains the fill details for a completed order.
+type OrderFill struct {
+	FilledBTC      float64
+	FillPrice      float64
+	USDCReceived   float64
+	Fees           float64
+}
+
+// WaitForFill polls the order until it reaches a terminal state and returns fill details.
+// Market orders on liquid pairs typically fill in under a second.
+func (c *Client) WaitForFill(ctx context.Context, orderID string) (OrderFill, error) {
+	for range 10 {
+		fill, done, err := c.getOrderFill(ctx, orderID)
+		if err != nil {
+			return OrderFill{}, err
+		}
+		if done {
+			return fill, nil
+		}
+		select {
+		case <-ctx.Done():
+			return OrderFill{}, ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return OrderFill{}, fmt.Errorf("order %s did not fill within timeout", orderID)
+}
+
+func (c *Client) getOrderFill(ctx context.Context, orderID string) (OrderFill, bool, error) {
+	var resp struct {
+		Order struct {
+			Status              string `json:"status"`
+			FilledSize          string `json:"filled_size"`
+			AverageFilledPrice  string `json:"average_filled_price"`
+			TotalFees           string `json:"total_fees"`
+			TotalValueAfterFees string `json:"total_value_after_fees"`
+		} `json:"order"`
+	}
+	if err := c.get(ctx, "/orders/historical/"+orderID, &resp); err != nil {
+		return OrderFill{}, false, err
+	}
+
+	switch resp.Order.Status {
+	case "FILLED":
+		filledBTC, _ := strconv.ParseFloat(resp.Order.FilledSize, 64)
+		fillPrice, _ := strconv.ParseFloat(resp.Order.AverageFilledPrice, 64)
+		fees, _ := strconv.ParseFloat(resp.Order.TotalFees, 64)
+		usdcReceived, _ := strconv.ParseFloat(resp.Order.TotalValueAfterFees, 64)
+		return OrderFill{
+			FilledBTC:    filledBTC,
+			FillPrice:    fillPrice,
+			Fees:         fees,
+			USDCReceived: usdcReceived,
+		}, true, nil
+	case "CANCELLED", "EXPIRED", "FAILED":
+		return OrderFill{}, false, fmt.Errorf("order %s ended with status %s", orderID, resp.Order.Status)
+	default:
+		return OrderFill{}, false, nil
+	}
+}
+
 func (c *Client) get(ctx context.Context, path string, out any) error {
 	return c.do(ctx, http.MethodGet, path, nil, out)
 }

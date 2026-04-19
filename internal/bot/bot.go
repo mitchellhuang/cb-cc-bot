@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mitchellhuang/cb-cc-bot/internal/coinbase"
 	"github.com/mitchellhuang/cb-cc-bot/internal/config"
 	"github.com/mitchellhuang/cb-cc-bot/internal/email"
 	"github.com/mitchellhuang/cb-cc-bot/internal/gmail"
@@ -23,6 +24,7 @@ type coinbaseClient interface {
 	TakerFeeRate(ctx context.Context) (float64, error)
 	BTCPrice(ctx context.Context) (float64, error)
 	MarketSellBTC(ctx context.Context, btcAmount float64) (string, error)
+	WaitForFill(ctx context.Context, orderID string) (coinbase.OrderFill, error)
 }
 
 type telegramClient interface {
@@ -221,7 +223,27 @@ func (b *Bot) handleCallback(ctx context.Context, cq *telegram.CallbackQuery) {
 			return
 		}
 		log.Printf("market sell placed: order %s for %.8f BTC (~$%.2f)", orderID, btcAmount, amount)
-		text := fmt.Sprintf("Market sell of *%.8f BTC* (~$%.2f) placed. Order ID: `%s`", btcAmount, amount, orderID)
+		if err := b.telegram.SendMessage(ctx, fmt.Sprintf("Order placed. Waiting for fill... Order ID: `%s`", orderID)); err != nil {
+			log.Printf("telegram notify: %v", err)
+		}
+
+		fill, err := b.coinbase.WaitForFill(ctx, orderID)
+		if err != nil {
+			log.Printf("wait for fill %s: %v", orderID, err)
+			b.telegram.SendMessage(ctx, fmt.Sprintf("Could not confirm fill for order `%s`: %v", orderID, err))
+			return
+		}
+
+		usdcBalance, err := b.coinbase.USDCBalance(ctx)
+		if err != nil {
+			log.Printf("post-fill USDC balance: %v", err)
+		}
+
+		log.Printf("order %s filled: %.8f BTC @ $%.2f, received $%.2f after $%.2f fees", orderID, fill.FilledBTC, fill.FillPrice, fill.USDCReceived, fill.Fees)
+		text := fmt.Sprintf(
+			"*Order filled*\n\nSold: *%.8f BTC* @ $%.2f\nFees: *$%.2f*\nUSDC received: *$%.2f*\nNew USDC balance: *$%.2f*",
+			fill.FilledBTC, fill.FillPrice, fill.Fees, fill.USDCReceived, usdcBalance,
+		)
 		if err := b.telegram.SendMessage(ctx, text); err != nil {
 			log.Printf("telegram notify: %v", err)
 		}

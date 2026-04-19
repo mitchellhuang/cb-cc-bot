@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mitchellhuang/cb-cc-bot/internal/coinbase"
 	"github.com/mitchellhuang/cb-cc-bot/internal/config"
 	"github.com/mitchellhuang/cb-cc-bot/internal/telegram"
 	gmailapi "google.golang.org/api/gmail/v1"
@@ -31,6 +32,14 @@ func (m *mockCoinbase) MarketSellBTC(_ context.Context, btcAmount float64) (stri
 	m.sellCalled = true
 	m.sellAmount = btcAmount
 	return m.orderID, nil
+}
+func (m *mockCoinbase) WaitForFill(_ context.Context, _ string) (coinbase.OrderFill, error) {
+	return coinbase.OrderFill{
+		FilledBTC:    m.sellAmount,
+		FillPrice:    m.btcPrice,
+		Fees:         0.50,
+		USDCReceived: m.sellAmount*m.btcPrice - 0.50,
+	}, nil
 }
 
 type mockTelegram struct {
@@ -202,8 +211,18 @@ func TestHandleCallback_Approve_ExecutesSell(t *testing.T) {
 	if b.pendingAmount != 0 {
 		t.Error("pendingAmount should be cleared after approval")
 	}
-	if len(tg.messages) != 1 || !strings.Contains(tg.messages[0], "order-123") {
-		t.Errorf("expected confirmation message with order ID, got: %v", tg.messages)
+	// first message: order placed; second message: fill confirmation
+	if len(tg.messages) != 2 {
+		t.Fatalf("expected 2 messages (placed + filled), got %d: %v", len(tg.messages), tg.messages)
+	}
+	if !strings.Contains(tg.messages[0], "order-123") {
+		t.Errorf("expected order ID in placed message, got: %s", tg.messages[0])
+	}
+	if !strings.Contains(tg.messages[1], "Order filled") {
+		t.Errorf("expected fill confirmation message, got: %s", tg.messages[1])
+	}
+	if !strings.Contains(tg.messages[1], "New USDC balance") {
+		t.Errorf("expected USDC balance in fill message, got: %s", tg.messages[1])
 	}
 }
 
